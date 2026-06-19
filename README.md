@@ -6,6 +6,8 @@
 
 - ✅ **多格式数据解析**：支持 JSON、Binary、Hex、CSV、Protobuf 五种数据格式
 - ✅ **数据完整性校验**：支持 SHA256 校验和验证
+- ✅ **自动时间排序**：解析后自动按时间戳升序排列，确保轨迹顺序正确
+- ✅ **灵活排序查询**：支持 `order=asc|desc` 参数，默认升序适合路线回放
 - ✅ **持久化存储**：使用 SQLite 数据库存储原始数据包和解析后的轨迹点
 - ✅ **RESTful API**：完整的 CRUD 操作接口
 - ✅ **OpenAPI 文档**：集成 Swagger UI 自动生成 API 文档
@@ -206,14 +208,20 @@ payload 为 Base64 编码的 Protocol Buffer 数据。
 - `end_time`: 结束时间，RFC3339 格式（可选）
 - `limit`: 返回数量限制，默认 100（可选）
 - `offset`: 偏移量（可选）
+- `order`: 排序方向，`asc`（升序，默认）或 `desc`（降序）（可选）
 
 ```bash
-# 查询指定设备的轨迹点
+# 查询指定设备的轨迹点（默认按时间升序，适合路线回放）
 curl "http://localhost:3000/api/v1/track/points?device_id=dev_001&limit=10"
+
+# 按时间范围查询，降序排列（最新在前）
+curl "http://localhost:3000/api/v1/track/points?device_id=dev_001&order=desc"
 
 # 按时间范围查询
 curl "http://localhost:3000/api/v1/track/points?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z"
 ```
+
+> **重要**：默认使用 `order=asc`（时间升序），确保路线回放时轨迹点按时间顺序正确排列。
 
 ### 4. 获取单个轨迹点
 

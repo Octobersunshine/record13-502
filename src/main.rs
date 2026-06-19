@@ -55,6 +55,7 @@ impl Modify for SecurityAddon {
             models::DataFormat,
             models::TrackPoint,
             models::TrackQuery,
+            models::SortOrder,
             models::TrackListResponse,
             models::UploadResponse,
             models::ApiResponse<serde_json::Value>,

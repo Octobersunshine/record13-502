@@ -48,13 +48,17 @@ impl PacketParser {
 
         debug!("Parsed {} track points", points.len());
 
-        let points: Vec<TrackPoint> = points
+        let mut points: Vec<TrackPoint> = points
             .into_iter()
             .map(|mut p| {
                 p.id = Some(uuid::Uuid::new_v4());
                 p
             })
             .collect();
+
+        points.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        debug!("Sorted {} track points by timestamp ascending", points.len());
 
         Ok(points)
     }

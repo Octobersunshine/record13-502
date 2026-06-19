@@ -393,3 +393,294 @@ async fn test_time_range_query() {
     let result_all = db.get_track_points(query_all).await.unwrap();
     assert_eq!(result_all.total, 3);
 }
+
+#[tokio::test]
+async fn test_parser_sorts_unordered_timestamps() {
+    use location_tracker::parser::PacketParser;
+    use location_tracker::models::{DataFormat, LocationDataPacket};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+    use serde_json::json;
+
+    let now = Utc::now();
+
+    let unordered_points = json!([
+        {
+            "latitude": 39.9060,
+            "longitude": 116.4090,
+            "timestamp": (now + Duration::seconds(20)).to_rfc3339(),
+        },
+        {
+            "latitude": 39.9042,
+            "longitude": 116.4074,
+            "timestamp": now.to_rfc3339(),
+        },
+        {
+            "latitude": 39.9050,
+            "longitude": 116.4080,
+            "timestamp": (now + Duration::seconds(10)).to_rfc3339(),
+        },
+        {
+            "latitude": 39.9070,
+            "longitude": 116.4100,
+            "timestamp": (now + Duration::seconds(5)).to_rfc3339(),
+        },
+    ]);
+
+    let packet = LocationDataPacket {
+        device_id: "sort_test_001".to_string(),
+        device_type: Some("TEST_DEVICE".to_string()),
+        firmware_version: Some("1.0.0".to_string()),
+        upload_time: Utc::now(),
+        data_format: DataFormat::Json,
+        payload: serde_json::to_string(&unordered_points).unwrap(),
+        checksum: None,
+        signature: None,
+    };
+
+    let raw_packet_id = Uuid::new_v4();
+    let result = PacketParser::parse_packet(&packet, raw_packet_id).await;
+
+    assert!(result.is_ok());
+    let points = result.unwrap();
+    assert_eq!(points.len(), 4);
+
+    assert!(points[0].timestamp <= points[1].timestamp);
+    assert!(points[1].timestamp <= points[2].timestamp);
+    assert!(points[2].timestamp <= points[3].timestamp);
+
+    assert_eq!(points[0].latitude, 39.9042);
+    assert_eq!(points[1].latitude, 39.9070);
+    assert_eq!(points[2].latitude, 39.9050);
+    assert_eq!(points[3].latitude, 39.9060);
+}
+
+#[tokio::test]
+async fn test_database_query_sort_order() {
+    use location_tracker::db::Database;
+    use location_tracker::models::{SortOrder, TrackPoint, TrackQuery};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    let db = Database::new("sqlite::memory:").await.unwrap();
+
+    let now = Utc::now();
+    let packet_id = Uuid::new_v4();
+
+    let points = vec![
+        TrackPoint {
+            id: None,
+            device_id: "sort_test_002".to_string(),
+            latitude: 1.0,
+            longitude: 1.0,
+            altitude: None,
+            speed: None,
+            heading: None,
+            satellites: None,
+            hdop: None,
+            timestamp: now + Duration::hours(3),
+            location_source: None,
+            accuracy: None,
+            battery_level: None,
+            extra_data: None,
+            created_at: None,
+        },
+        TrackPoint {
+            id: None,
+            device_id: "sort_test_002".to_string(),
+            latitude: 2.0,
+            longitude: 2.0,
+            altitude: None,
+            speed: None,
+            heading: None,
+            satellites: None,
+            hdop: None,
+            timestamp: now + Duration::hours(1),
+            location_source: None,
+            accuracy: None,
+            battery_level: None,
+            extra_data: None,
+            created_at: None,
+        },
+        TrackPoint {
+            id: None,
+            device_id: "sort_test_002".to_string(),
+            latitude: 3.0,
+            longitude: 3.0,
+            altitude: None,
+            speed: None,
+            heading: None,
+            satellites: None,
+            hdop: None,
+            timestamp: now + Duration::hours(2),
+            location_source: None,
+            accuracy: None,
+            battery_level: None,
+            extra_data: None,
+            created_at: None,
+        },
+    ];
+
+    db.insert_track_points(&points, packet_id).await.unwrap();
+
+    let query_asc = TrackQuery {
+        device_id: Some("sort_test_002".to_string()),
+        start_time: None,
+        end_time: None,
+        limit: None,
+        offset: None,
+        order: SortOrder::Asc,
+    };
+
+    let result_asc = db.get_track_points(query_asc).await.unwrap();
+    assert_eq!(result_asc.total, 3);
+    assert_eq!(result_asc.points[0].latitude, 2.0);
+    assert_eq!(result_asc.points[1].latitude, 3.0);
+    assert_eq!(result_asc.points[2].latitude, 1.0);
+    assert!(result_asc.points[0].timestamp < result_asc.points[1].timestamp);
+    assert!(result_asc.points[1].timestamp < result_asc.points[2].timestamp);
+
+    let query_desc = TrackQuery {
+        device_id: Some("sort_test_002".to_string()),
+        start_time: None,
+        end_time: None,
+        limit: None,
+        offset: None,
+        order: SortOrder::Desc,
+    };
+
+    let result_desc = db.get_track_points(query_desc).await.unwrap();
+    assert_eq!(result_desc.total, 3);
+    assert_eq!(result_desc.points[0].latitude, 1.0);
+    assert_eq!(result_desc.points[1].latitude, 3.0);
+    assert_eq!(result_desc.points[2].latitude, 2.0);
+    assert!(result_desc.points[0].timestamp > result_desc.points[1].timestamp);
+    assert!(result_desc.points[1].timestamp > result_desc.points[2].timestamp);
+
+    let query_default = TrackQuery {
+        device_id: Some("sort_test_002".to_string()),
+        start_time: None,
+        end_time: None,
+        limit: None,
+        offset: None,
+        order: Default::default(),
+    };
+
+    let result_default = db.get_track_points(query_default).await.unwrap();
+    assert_eq!(result_default.points[0].latitude, 2.0);
+    assert_eq!(result_default.points[1].latitude, 3.0);
+    assert_eq!(result_default.points[2].latitude, 1.0);
+}
+
+#[tokio::test]
+async fn test_track_playback_correct_order() {
+    use location_tracker::db::Database;
+    use location_tracker::models::{TrackPoint, TrackQuery, SortOrder};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    let db = Database::new("sqlite::memory:").await.unwrap();
+
+    let now = Utc::now();
+    let packet_id = Uuid::new_v4();
+
+    let route_points = vec![
+        ("起点", 39.9000, 116.4000, Duration::seconds(0)),
+        ("点A", 39.9010, 116.4010, Duration::seconds(10)),
+        ("点B", 39.9020, 116.4020, Duration::seconds(20)),
+        ("点C", 39.9030, 116.4030, Duration::seconds(30)),
+        ("点D", 39.9040, 116.4040, Duration::seconds(40)),
+        ("终点", 39.9050, 116.4050, Duration::seconds(50)),
+    ];
+
+    let mut points: Vec<TrackPoint> = route_points
+        .iter()
+        .map(|(_, lat, lng, offset)| TrackPoint {
+            id: None,
+            device_id: "playback_test_001".to_string(),
+            latitude: *lat,
+            longitude: *lng,
+            altitude: None,
+            speed: Some(10.0),
+            heading: Some(45.0),
+            satellites: Some(8),
+            hdop: None,
+            timestamp: now + *offset,
+            location_source: Some("GPS".to_string()),
+            accuracy: None,
+            battery_level: None,
+            extra_data: None,
+            created_at: None,
+        })
+        .collect();
+
+    points.reverse();
+
+    db.insert_track_points(&points, packet_id).await.unwrap();
+
+    let query = TrackQuery {
+        device_id: Some("playback_test_001".to_string()),
+        start_time: None,
+        end_time: None,
+        limit: None,
+        offset: None,
+        order: SortOrder::Asc,
+    };
+
+    let result = db.get_track_points(query).await.unwrap();
+    assert_eq!(result.total, 6);
+
+    assert!((result.points[0].latitude - 39.9000).abs() < 0.0001);
+    assert!((result.points[1].latitude - 39.9010).abs() < 0.0001);
+    assert!((result.points[2].latitude - 39.9020).abs() < 0.0001);
+    assert!((result.points[3].latitude - 39.9030).abs() < 0.0001);
+    assert!((result.points[4].latitude - 39.9040).abs() < 0.0001);
+    assert!((result.points[5].latitude - 39.9050).abs() < 0.0001);
+
+    for i in 0..result.points.len() - 1 {
+        assert!(
+            result.points[i].timestamp < result.points[i + 1].timestamp,
+            "Point {} should have earlier timestamp than point {}",
+            i,
+            i + 1
+        );
+    }
+
+    let distances: Vec<f64> = result.points.windows(2)
+        .map(|pair| {
+            let dlat = pair[1].latitude - pair[0].latitude;
+            let dlng = pair[1].longitude - pair[0].longitude;
+            (dlat * dlat + dlng * dlng).sqrt()
+        })
+        .collect();
+
+    for d in distances {
+        assert!((d - 0.0014142).abs() < 0.0001, "Distance should be consistent for route playback");
+    }
+}
+
+#[test]
+fn test_sort_order_default_is_asc() {
+    use location_tracker::models::SortOrder;
+
+    let default_order: SortOrder = Default::default();
+    assert_eq!(default_order, SortOrder::Asc);
+}
+
+#[test]
+fn test_sort_order_serde() {
+    use location_tracker::models::SortOrder;
+    use serde_json;
+
+    let asc_json = serde_json::to_string(&SortOrder::Asc).unwrap();
+    assert_eq!(asc_json, "\"asc\"");
+
+    let desc_json = serde_json::to_string(&SortOrder::Desc).unwrap();
+    assert_eq!(desc_json, "\"desc\"");
+
+    let asc: SortOrder = serde_json::from_str("\"asc\"").unwrap();
+    assert_eq!(asc, SortOrder::Asc);
+
+    let desc: SortOrder = serde_json::from_str("\"desc\"").unwrap();
+    assert_eq!(desc, SortOrder::Desc);
+}

@@ -137,6 +137,21 @@ pub struct ApiResponse<T> {
     pub data: Option<T>,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    #[schema(example = "asc")]
+    Asc,
+    #[schema(example = "desc")]
+    Desc,
+}
+
+impl Default for SortOrder {
+    fn default() -> Self {
+        SortOrder::Asc
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TrackQuery {
     pub device_id: Option<String>,
@@ -144,6 +159,10 @@ pub struct TrackQuery {
     pub end_time: Option<DateTime<Utc>>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+
+    #[schema(example = "asc", default = "asc")]
+    #[serde(default)]
+    pub order: SortOrder,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

@@ -1,5 +1,5 @@
 use crate::errors::{AppError, AppResult};
-use crate::models::{LocationDataPacket, RawPacketRecord, TrackPoint, TrackQuery, TrackListResponse};
+use crate::models::{LocationDataPacket, RawPacketRecord, SortOrder, TrackPoint, TrackQuery, TrackListResponse};
 use chrono::{DateTime, Utc};
 use sqlx::{sqlite::SqlitePool, SqlitePoolOptions};
 use tracing::{info, debug};
@@ -227,7 +227,11 @@ impl Database {
             count_sql = &format!("{} AND {}", count_sql, cond_str);
         }
 
-        sql = &format!("{} ORDER BY timestamp DESC", sql);
+        let order_str = match query.order {
+            SortOrder::Asc => "ORDER BY timestamp ASC",
+            SortOrder::Desc => "ORDER BY timestamp DESC",
+        };
+        sql = &format!("{} {}", sql, order_str);
 
         if let Some(limit) = query.limit {
             sql = &format!("{} LIMIT {}", sql, limit);
