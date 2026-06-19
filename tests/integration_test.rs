@@ -684,3 +684,365 @@ fn test_sort_order_serde() {
     let desc: SortOrder = serde_json::from_str("\"desc\"").unwrap();
     assert_eq!(desc, SortOrder::Desc);
 }
+
+#[tokio::test]
+async fn test_track_points_with_distance_insertion() {
+    use location_tracker::db::Database;
+    use location_tracker::models::{SortOrder, TrackPoint, TrackQuery};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    let db = Database::new("sqlite::memory:").await.unwrap();
+
+    let now = Utc::now();
+    let packet_id = Uuid::new_v4();
+
+    let base_lat = 39.9000;
+    let base_lng = 116.4000;
+
+    let points: Vec<TrackPoint> = (0..5)
+        .map(|i| TrackPoint {
+            id: None,
+            device_id: "dist_test_001".to_string(),
+            latitude: base_lat + (i as f64) * 0.001,
+            longitude: base_lng + (i as f64) * 0.001,
+            altitude: None,
+            speed: Some(30.0 + i as f64),
+            heading: Some(45.0),
+            satellites: Some(8),
+            hdop: None,
+            timestamp: now + Duration::seconds(i * 10),
+            location_source: Some("GPS".to_string()),
+            accuracy: Some(5.0),
+            battery_level: Some(85.0),
+            extra_data: None,
+            distance: None,
+            cumulative_distance: None,
+            created_at: None,
+        })
+        .collect();
+
+    let inserted = db.insert_track_points(&points, packet_id).await.unwrap();
+    assert_eq!(inserted, 5);
+
+    let query = TrackQuery {
+        device_id: Some("dist_test_001".to_string()),
+        start_time: None,
+        end_time: None,
+        limit: None,
+        offset: None,
+        order: SortOrder::Asc,
+    };
+
+    let result = db.get_track_points(query).await.unwrap();
+    assert_eq!(result.total, 5);
+
+    assert!(result.points[0].distance.unwrap_or(0.0) < 0.01);
+
+    for i in 1..result.points.len() {
+        let dist = result.points[i].distance.unwrap();
+        assert!(dist > 100.0 && dist < 200.0, "Distance at {} should be ~141m, got {}", i, dist);
+    }
+
+    for i in 1..result.points.len() {
+        let cum = result.points[i].cumulative_distance.unwrap();
+        let prev_cum = result.points[i - 1].cumulative_distance.unwrap();
+        assert!(cum > prev_cum, "Cumulative distance should increase at index {}", i);
+    }
+
+    assert!(result.total_distance_meters > 400.0 && result.total_distance_meters < 800.0);
+    assert!(result.total_distance_formatted.contains("km") || result.total_distance_formatted.contains("m"));
+}
+
+#[tokio::test]
+async fn test_mileage_calculation_single_device() {
+    use location_tracker::db::Database;
+    use location_tracker::models::{MileageQuery, TrackPoint};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    let db = Database::new("sqlite::memory:").await.unwrap();
+
+    let now = Utc::now();
+    let packet_id = Uuid::new_v4();
+
+    let points: Vec<TrackPoint> = (0..10)
+        .map(|i| TrackPoint {
+            id: None,
+            device_id: "mileage_001".to_string(),
+            latitude: 39.9000 + (i as f64) * 0.001,
+            longitude: 116.4000 + (i as f64) * 0.001,
+            altitude: None,
+            speed: Some(50.0),
+            heading: Some(45.0),
+            satellites: Some(8),
+            hdop: None,
+            timestamp: now + Duration::seconds(i * 10),
+            location_source: Some("GPS".to_string()),
+            accuracy: Some(5.0),
+            battery_level: Some(85.0),
+            extra_data: None,
+            distance: None,
+            cumulative_distance: None,
+            created_at: None,
+        })
+        .collect();
+
+    db.insert_track_points(&points, packet_id).await.unwrap();
+
+    let query = MileageQuery {
+        device_id: Some("mileage_001".to_string()),
+        start_time: None,
+        end_time: None,
+        max_speed_kmh: None,
+        min_accuracy: None,
+        stop_timeout_seconds: None,
+    };
+
+    let stats = db.calculate_mileage(query).await.unwrap();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].device_id, "mileage_001");
+    assert!(stats[0].point_count >= 9);
+    assert!(stats[0].total_distance_meters > 1000.0);
+    assert!(stats[0].start_time.is_some());
+    assert!(stats[0].end_time.is_some());
+    assert!(stats[0].avg_speed_kmh.is_some());
+    assert!(stats[0].max_speed_kmh.is_some());
+    assert!(stats[0].moving_duration_minutes.is_some());
+}
+
+#[tokio::test]
+async fn test_mileage_calculation_multiple_devices() {
+    use location_tracker::db::Database;
+    use location_tracker::models::{MileageQuery, TrackPoint};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    let db = Database::new("sqlite::memory:").await.unwrap();
+
+    let now = Utc::now();
+    let packet_id1 = Uuid::new_v4();
+    let packet_id2 = Uuid::new_v4();
+
+    let points1: Vec<TrackPoint> = (0..5)
+        .map(|i| TrackPoint {
+            id: None,
+            device_id: "mileage_multi_001".to_string(),
+            latitude: 39.9000 + (i as f64) * 0.001,
+            longitude: 116.4000 + (i as f64) * 0.001,
+            altitude: None,
+            speed: Some(40.0),
+            heading: Some(45.0),
+            satellites: Some(8),
+            hdop: None,
+            timestamp: now + Duration::seconds(i * 10),
+            location_source: Some("GPS".to_string()),
+            accuracy: Some(5.0),
+            battery_level: Some(85.0),
+            extra_data: None,
+            distance: None,
+            cumulative_distance: None,
+            created_at: None,
+        })
+        .collect();
+
+    let points2: Vec<TrackPoint> = (0..5)
+        .map(|i| TrackPoint {
+            id: None,
+            device_id: "mileage_multi_002".to_string(),
+            latitude: 31.2300 + (i as f64) * 0.001,
+            longitude: 121.4700 + (i as f64) * 0.001,
+            altitude: None,
+            speed: Some(60.0),
+            heading: Some(90.0),
+            satellites: Some(10),
+            hdop: None,
+            timestamp: now + Duration::seconds(i * 10),
+            location_source: Some("GPS".to_string()),
+            accuracy: Some(3.0),
+            battery_level: Some(90.0),
+            extra_data: None,
+            distance: None,
+            cumulative_distance: None,
+            created_at: None,
+        })
+        .collect();
+
+    db.insert_track_points(&points1, packet_id1).await.unwrap();
+    db.insert_track_points(&points2, packet_id2).await.unwrap();
+
+    let query = MileageQuery {
+        device_id: None,
+        start_time: None,
+        end_time: None,
+        max_speed_kmh: None,
+        min_accuracy: None,
+        stop_timeout_seconds: None,
+    };
+
+    let stats = db.calculate_mileage(query).await.unwrap();
+    assert_eq!(stats.len(), 2);
+
+    let device_ids: Vec<&String> = stats.iter().map(|s| &s.device_id).collect();
+    assert!(device_ids.contains(&&"mileage_multi_001".to_string()));
+    assert!(device_ids.contains(&&"mileage_multi_002".to_string()));
+}
+
+#[tokio::test]
+async fn test_mileage_with_speed_filter() {
+    use location_tracker::db::Database;
+    use location_tracker::models::{MileageQuery, TrackPoint};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    let db = Database::new("sqlite::memory:").await.unwrap();
+
+    let now = Utc::now();
+    let packet_id = Uuid::new_v4();
+
+    let mut points = Vec::new();
+
+    for i in 0..10 {
+        let speed = if i == 5 { 500.0 } else { 40.0 };
+        points.push(TrackPoint {
+            id: None,
+            device_id: "speed_filter_001".to_string(),
+            latitude: 39.9000 + (i as f64) * 0.001,
+            longitude: 116.4000 + (i as f64) * 0.001,
+            altitude: None,
+            speed: Some(speed),
+            heading: Some(45.0),
+            satellites: Some(8),
+            hdop: None,
+            timestamp: now + Duration::seconds(i * 10),
+            location_source: Some("GPS".to_string()),
+            accuracy: Some(5.0),
+            battery_level: Some(85.0),
+            extra_data: None,
+            distance: None,
+            cumulative_distance: None,
+            created_at: None,
+        });
+    }
+
+    db.insert_track_points(&points, packet_id).await.unwrap();
+
+    let query_without_filter = MileageQuery {
+        device_id: Some("speed_filter_001".to_string()),
+        start_time: None,
+        end_time: None,
+        max_speed_kmh: None,
+        min_accuracy: None,
+        stop_timeout_seconds: None,
+    };
+    let stats_without = db.calculate_mileage(query_without_filter).await.unwrap();
+    let points_without = stats_without[0].point_count;
+
+    let query_with_filter = MileageQuery {
+        device_id: Some("speed_filter_001".to_string()),
+        start_time: None,
+        end_time: None,
+        max_speed_kmh: Some(200.0),
+        min_accuracy: None,
+        stop_timeout_seconds: None,
+    };
+    let stats_with = db.calculate_mileage(query_with_filter).await.unwrap();
+    let points_with = stats_with[0].point_count;
+
+    assert!(points_with < points_without, "Speed filter should reduce point count: with={}, without={}", points_with, points_without);
+}
+
+#[tokio::test]
+async fn test_continuous_mileage_across_packets() {
+    use location_tracker::db::Database;
+    use location_tracker::models::{SortOrder, TrackPoint, TrackQuery};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    let db = Database::new("sqlite::memory:").await.unwrap();
+
+    let now = Utc::now();
+    let packet_id1 = Uuid::new_v4();
+    let packet_id2 = Uuid::new_v4();
+
+    let points1: Vec<TrackPoint> = (0..3)
+        .map(|i| TrackPoint {
+            id: None,
+            device_id: "continuous_001".to_string(),
+            latitude: 39.9000 + (i as f64) * 0.001,
+            longitude: 116.4000 + (i as f64) * 0.001,
+            altitude: None,
+            speed: Some(50.0),
+            heading: Some(45.0),
+            satellites: Some(8),
+            hdop: None,
+            timestamp: now + Duration::seconds(i * 10),
+            location_source: Some("GPS".to_string()),
+            accuracy: Some(5.0),
+            battery_level: Some(85.0),
+            extra_data: None,
+            distance: None,
+            cumulative_distance: None,
+            created_at: None,
+        })
+        .collect();
+
+    db.insert_track_points(&points1, packet_id1).await.unwrap();
+
+    let points2: Vec<TrackPoint> = (0..3)
+        .map(|i| TrackPoint {
+            id: None,
+            device_id: "continuous_001".to_string(),
+            latitude: 39.9030 + (i as f64) * 0.001,
+            longitude: 116.4030 + (i as f64) * 0.001,
+            altitude: None,
+            speed: Some(50.0),
+            heading: Some(45.0),
+            satellites: Some(8),
+            hdop: None,
+            timestamp: now + Duration::seconds(30 + i * 10),
+            location_source: Some("GPS".to_string()),
+            accuracy: Some(5.0),
+            battery_level: Some(85.0),
+            extra_data: None,
+            distance: None,
+            cumulative_distance: None,
+            created_at: None,
+        })
+        .collect();
+
+    db.insert_track_points(&points2, packet_id2).await.unwrap();
+
+    let query = TrackQuery {
+        device_id: Some("continuous_001".to_string()),
+        start_time: None,
+        end_time: None,
+        limit: None,
+        offset: None,
+        order: SortOrder::Asc,
+    };
+
+    let result = db.get_track_points(query).await.unwrap();
+    assert_eq!(result.total, 6);
+    assert!(result.total_distance_meters > 500.0 && result.total_distance_meters < 1000.0);
+
+    for i in 1..result.points.len() {
+        let cum = result.points[i].cumulative_distance.unwrap();
+        let prev_cum = result.points[i - 1].cumulative_distance.unwrap();
+        assert!(cum > prev_cum, "Cumulative distance should be continuous across packets at index {}", i);
+    }
+}
+
+#[test]
+fn test_distance_module_haversine() {
+    use location_tracker::distance::{haversine_distance_km, haversine_distance_meters, format_distance};
+
+    let d = haversine_distance_meters(39.9042, 116.4074, 39.9042, 116.4074);
+    assert!(d < 0.01);
+
+    let d_km = haversine_distance_km(39.9042, 116.4074, 39.9043, 116.4074);
+    assert!(d_km > 0.005 && d_km < 0.02);
+
+    assert_eq!(format_distance(500.0), "500.0 m");
+    assert!(format_distance(2500.0).contains("km"));
+}

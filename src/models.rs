@@ -92,6 +92,14 @@ pub struct TrackPoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_data: Option<serde_json::Value>,
 
+    #[schema(example = 150.5)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f64>,
+
+    #[schema(example = 2500.0)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cumulative_distance: Option<f64>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -169,6 +177,58 @@ pub struct TrackQuery {
 pub struct TrackListResponse {
     pub total: i64,
     pub points: Vec<TrackPoint>,
+
+    #[schema(example = 5234.5)]
+    pub total_distance_meters: f64,
+
+    #[schema(example = "5.23 km")]
+    pub total_distance_formatted: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct MileageStats {
+    #[schema(example = "dev_001")]
+    pub device_id: String,
+
+    #[schema(example = 150)]
+    pub point_count: i64,
+
+    #[schema(example = 12500.0)]
+    pub total_distance_meters: f64,
+
+    #[schema(example = "12.50 km")]
+    pub total_distance_formatted: String,
+
+    #[schema(example = "2024-01-15T08:00:00Z")]
+    pub start_time: Option<DateTime<Utc>>,
+
+    #[schema(example = "2024-01-15T18:00:00Z")]
+    pub end_time: Option<DateTime<Utc>>,
+
+    #[schema(example = 60.5)]
+    pub avg_speed_kmh: Option<f64>,
+
+    #[schema(example = 120.0)]
+    pub max_speed_kmh: Option<f64>,
+
+    #[schema(example = 45.0)]
+    pub moving_duration_minutes: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct MileageQuery {
+    pub device_id: Option<String>,
+    pub start_time: Option<DateTime<Utc>>,
+    pub end_time: Option<DateTime<Utc>>,
+
+    #[schema(example = 200.0)]
+    pub max_speed_kmh: Option<f64>,
+
+    #[schema(example = 50.0)]
+    pub min_accuracy: Option<f64>,
+
+    #[schema(example = 300)]
+    pub stop_timeout_seconds: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

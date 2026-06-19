@@ -1,7 +1,8 @@
 use crate::db::Database;
 use crate::errors::{AppError, AppResult};
 use crate::models::{
-    ApiResponse, LocationDataPacket, TrackListResponse, TrackPoint, TrackQuery, UploadResponse,
+    ApiResponse, LocationDataPacket, MileageQuery, MileageStats, TrackListResponse, TrackPoint,
+    TrackQuery, UploadResponse,
 };
 use crate::parser::PacketParser;
 use axum::{
@@ -218,6 +219,36 @@ pub async fn get_raw_packet(
             "Raw packet not found"
         ))),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/track/mileage",
+    params(MileageQuery),
+    responses(
+        (status = 200, description = "Mileage statistics for devices", body = [MileageStats]),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Track"
+)]
+pub async fn get_track_mileage(
+    State(db): State<Database>,
+    Query(query): Query<MileageQuery>,
+) -> AppResult<Json<ApiResponse<Vec<MileageStats>>>> {
+    debug!("Getting mileage stats: {:?}", query);
+
+    let stats = db.calculate_mileage(query).await?;
+    let total_distance: f64 = stats.iter().map(|s| s.total_distance_meters).sum();
+
+    Ok(Json(ApiResponse {
+        success: true,
+        message: format!(
+            "Calculated mileage for {} devices, total distance: {}",
+            stats.len(),
+            crate::distance::format_distance(total_distance)
+        ),
+        data: Some(stats),
+    }))
 }
 
 pub async fn not_found() -> impl axum::response::IntoResponse {

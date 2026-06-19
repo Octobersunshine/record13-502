@@ -154,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json::<Value>()
         .await?;
     println!("   Total points: {}\n", all_points["total"]);
+    println!("   Total distance: {}\n", all_points["total_distance_formatted"]);
 
     println!("8. Upload with checksum verification:");
     let payload_data = json!([
@@ -189,6 +190,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json::<Value>()
         .await?;
     println!("   Response: {}\n", serde_json::to_string_pretty(&checksum_response)?);
+
+    println!("9. Calculate mileage statistics:");
+    let mileage_response = client
+        .get(format!("{}/api/v1/track/mileage?max_speed_kmh=200&min_accuracy=50", base_url))
+        .send()
+        .await?
+        .json::<Value>()
+        .await?;
+    println!("   Response: {}\n", serde_json::to_string_pretty(&mileage_response)?);
+
+    println!("10. Calculate mileage for specific device:");
+    let device_mileage = client
+        .get(format!("{}/api/v1/track/mileage?device_id=dev_001", base_url))
+        .send()
+        .await?
+        .json::<Value>()
+        .await?;
+    println!("   Response: {}\n", serde_json::to_string_pretty(&device_mileage)?);
 
     println!("=== All tests completed ===");
 

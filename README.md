@@ -8,6 +8,9 @@
 - ✅ **数据完整性校验**：支持 SHA256 校验和验证
 - ✅ **自动时间排序**：解析后自动按时间戳升序排列，确保轨迹顺序正确
 - ✅ **灵活排序查询**：支持 `order=asc|desc` 参数，默认升序适合路线回放
+- ✅ **轨迹里程自动计算**：基于 Haversine 公式自动计算连续定位点间距离
+- ✅ **累计里程统计**：按设备/时间范围统计总行驶里程、平均速度、行驶时长
+- ✅ **异常点过滤**：支持按最大速度、精度阈值过滤异常定位点
 - ✅ **持久化存储**：使用 SQLite 数据库存储原始数据包和解析后的轨迹点
 - ✅ **RESTful API**：完整的 CRUD 操作接口
 - ✅ **OpenAPI 文档**：集成 Swagger UI 自动生成 API 文档
@@ -292,6 +295,8 @@ curl "http://localhost:3000/api/v1/packets/550e8400-e29b-41d4-a716-446655440000"
 | `accuracy` | REAL | 精度 (米) |
 | `battery_level` | REAL | 电量 (%) |
 | `extra_data` | TEXT | 额外数据 (JSON) |
+| `distance` | REAL | 距上一点的距离 (米) |
+| `cumulative_distance` | REAL | 累计行驶距离 (米) |
 | `raw_packet_id` | TEXT | 关联原始数据包 ID |
 | `created_at` | TEXT | 创建时间 |
 

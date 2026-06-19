@@ -1,8 +1,9 @@
+use crate::distance::{calculate_cumulative_distances, calculate_segment_distance, filter_and_calculate_distance, format_distance};
 use crate::errors::{AppError, AppResult};
-use crate::models::{LocationDataPacket, RawPacketRecord, SortOrder, TrackPoint, TrackQuery, TrackListResponse};
-use chrono::{DateTime, Utc};
+use crate::models::{LocationDataPacket, MileageQuery, MileageStats, RawPacketRecord, SortOrder, TrackPoint, TrackQuery, TrackListResponse};
+use chrono::{DateTime, Duration, Utc};
 use sqlx::{sqlite::SqlitePool, SqlitePoolOptions};
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -64,6 +65,8 @@ impl Database {
                 accuracy REAL,
                 battery_level REAL,
                 extra_data TEXT,
+                distance REAL DEFAULT 0,
+                cumulative_distance REAL DEFAULT 0,
                 raw_packet_id TEXT,
                 created_at TEXT NOT NULL
             )
@@ -71,6 +74,18 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        let _ = sqlx::query(
+            "ALTER TABLE track_points ADD COLUMN distance REAL DEFAULT 0"
+        )
+        .execute(&self.pool)
+        .await;
+
+        let _ = sqlx::query(
+            "ALTER TABLE track_points ADD COLUMN cumulative_distance REAL DEFAULT 0"
+        )
+        .execute(&self.pool)
+        .await;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_track_points_device_time ON track_points(device_id, timestamp)"
@@ -154,10 +169,47 @@ impl Database {
         points: &[TrackPoint],
         raw_packet_id: Uuid,
     ) -> AppResult<usize> {
+        if points.is_empty() {
+            return Ok(0);
+        }
+
+        let device_id = &points[0].device_id;
+        let last_prev_point = self.get_last_point_before(device_id, points[0].timestamp).await?;
+
+        let mut cumulative_base = 0.0;
+        let mut prev_point = last_prev_point.clone();
+
+        if let Some(ref last) = last_prev_point {
+            cumulative_base = last.cumulative_distance.unwrap_or(0.0);
+        }
+
+        let mut enhanced_points: Vec<TrackPoint> = Vec::with_capacity(points.len());
+
+        for (idx, point) in points.iter().enumerate() {
+            let mut ep = point.clone();
+
+            let distance_from_prev = if idx == 0 {
+                if let Some(ref prev) = prev_point {
+                    calculate_segment_distance(prev, point)
+                } else {
+                    0.0
+                }
+            } else {
+                calculate_segment_distance(&points[idx - 1], point)
+            };
+
+            ep.distance = Some(distance_from_prev);
+            cumulative_base += distance_from_prev;
+            ep.cumulative_distance = Some(cumulative_base);
+
+            prev_point = Some(ep.clone());
+            enhanced_points.push(ep);
+        }
+
         let mut inserted = 0;
         let raw_packet_id_str = raw_packet_id.to_string();
 
-        for point in points {
+        for point in &enhanced_points {
             let id = point.id.unwrap_or_else(Uuid::new_v4);
             let now = Utc::now();
 
@@ -167,8 +219,9 @@ impl Database {
                     id, device_id, latitude, longitude, altitude,
                     speed, heading, satellites, hdop, timestamp,
                     location_source, accuracy, battery_level,
-                    extra_data, raw_packet_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    extra_data, distance, cumulative_distance,
+                    raw_packet_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(id.to_string())
@@ -185,6 +238,8 @@ impl Database {
             .bind(point.accuracy)
             .bind(point.battery_level)
             .bind(point.extra_data.as_ref().map(|v| v.to_string()))
+            .bind(point.distance)
+            .bind(point.cumulative_distance)
             .bind(&raw_packet_id_str)
             .bind(now.to_rfc3339())
             .execute(&self.pool)
@@ -193,15 +248,100 @@ impl Database {
             inserted += 1;
         }
 
-        debug!("Inserted {} track points", inserted);
+        debug!(
+            "Inserted {} track points with distance calculation for device {}",
+            inserted, device_id
+        );
         Ok(inserted)
+    }
+
+    async fn get_last_point_before(
+        &self,
+        device_id: &str,
+        before_time: DateTime<Utc>,
+    ) -> AppResult<Option<TrackPoint>> {
+        let row: Option<(
+            String,
+            String,
+            f64,
+            f64,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<i64>,
+            Option<f64>,
+            String,
+            Option<String>,
+            Option<f64>,
+            Option<f64>,
+            Option<String>,
+            Option<f64>,
+            Option<f64>,
+            String,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, device_id, latitude, longitude, altitude, speed, heading, satellites, hdop,
+                   timestamp, location_source, accuracy, battery_level, extra_data,
+                   distance, cumulative_distance, created_at
+            FROM track_points
+            WHERE device_id = ? AND timestamp < ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(device_id)
+        .bind(before_time.to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| {
+            let (
+                id,
+                device_id,
+                latitude,
+                longitude,
+                altitude,
+                speed,
+                heading,
+                satellites,
+                hdop,
+                timestamp,
+                location_source,
+                accuracy,
+                battery_level,
+                extra_data,
+                distance,
+                cumulative_distance,
+                created_at,
+            ) = row;
+
+            TrackPoint {
+                id: Some(Uuid::parse_str(&id).unwrap()),
+                device_id,
+                latitude,
+                longitude,
+                altitude,
+                speed,
+                heading,
+                satellites: satellites.map(|s| s as i32),
+                hdop,
+                timestamp: DateTime::parse_from_rfc3339(&timestamp).unwrap().with_timezone(&Utc),
+                location_source,
+                accuracy,
+                battery_level: battery_level.map(|b| b as f32),
+                extra_data: extra_data.as_deref().map(|s| serde_json::from_str(s).ok()),
+                distance,
+                cumulative_distance,
+                created_at: Some(DateTime::parse_from_rfc3339(&created_at).unwrap().with_timezone(&Utc)),
+            }
+        }))
     }
 
     pub async fn get_track_points(
         &self,
         query: TrackQuery,
     ) -> AppResult<TrackListResponse> {
-        let mut sql = "SELECT id, device_id, latitude, longitude, altitude, speed, heading, satellites, hdop, timestamp, location_source, accuracy, battery_level, extra_data, created_at FROM track_points WHERE 1=1";
+        let mut sql = "SELECT id, device_id, latitude, longitude, altitude, speed, heading, satellites, hdop, timestamp, location_source, accuracy, battery_level, extra_data, distance, cumulative_distance, created_at FROM track_points WHERE 1=1";
         let mut count_sql = "SELECT COUNT(*) FROM track_points WHERE 1=1";
         let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<String> = Vec::new();
@@ -266,6 +406,8 @@ impl Database {
             Option<f64>,
             Option<f64>,
             Option<String>,
+            Option<f64>,
+            Option<f64>,
             String,
         )> = {
             let mut q = sqlx::query_as(sql);
@@ -294,6 +436,8 @@ impl Database {
                         accuracy,
                         battery_level,
                         extra_data,
+                        distance,
+                        cumulative_distance,
                         created_at,
                     ) = row;
 
@@ -314,6 +458,8 @@ impl Database {
                         extra_data: extra_data
                             .as_deref()
                             .map(|s| serde_json::from_str(s).ok()),
+                        distance,
+                        cumulative_distance,
                         created_at: Some(
                             DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
                     })
@@ -321,9 +467,19 @@ impl Database {
             )
             .collect::<Result<Vec<_>, _>>()?;
 
+        let total_distance_meters: f64 = if query.order == SortOrder::Asc {
+            calculate_total_distance(&points)
+        } else {
+            let mut reversed = points.clone();
+            reversed.reverse();
+            calculate_total_distance(&reversed)
+        };
+
         Ok(TrackListResponse {
             total: count,
             points,
+            total_distance_meters,
+            total_distance_formatted: format_distance(total_distance_meters),
         })
     }
 
@@ -343,10 +499,12 @@ impl Database {
             Option<f64>,
             Option<f64>,
             Option<String>,
+            Option<f64>,
+            Option<f64>,
             String,
         )> = sqlx::query_as(
             r#"
-            SELECT id, device_id, latitude, longitude, altitude, speed, heading, satellites, hdop, timestamp, location_source, accuracy, battery_level, extra_data, created_at
+            SELECT id, device_id, latitude, longitude, altitude, speed, heading, satellites, hdop, timestamp, location_source, accuracy, battery_level, extra_data, distance, cumulative_distance, created_at
             FROM track_points WHERE id = ?
             "#,
         )
@@ -370,6 +528,8 @@ impl Database {
                 accuracy,
                 battery_level,
                 extra_data,
+                distance,
+                cumulative_distance,
                 created_at,
             ) = row;
 
@@ -388,6 +548,8 @@ impl Database {
                 accuracy,
                 battery_level: battery_level.map(|b| b as f32),
                 extra_data: extra_data.as_deref().map(|s| serde_json::from_str(s).ok()),
+                distance,
+                cumulative_distance,
                 created_at: Some(DateTime::parse_from_rfc3339(&created_at).unwrap().with_timezone(&Utc)),
             }
         }))
@@ -467,5 +629,192 @@ impl Database {
         .await?;
 
         Ok(devices.into_iter().map(|d| d.0).collect())
+    }
+
+    pub async fn calculate_mileage(
+        &self,
+        query: MileageQuery,
+    ) -> AppResult<Vec<MileageStats>> {
+        debug!("Calculating mileage with query: {:?}", query);
+
+        let mut sql = "SELECT id, device_id, latitude, longitude, altitude, speed, heading, satellites, hdop, timestamp, location_source, accuracy, battery_level, extra_data, distance, cumulative_distance, created_at FROM track_points WHERE 1=1";
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+
+        if let Some(device_id) = &query.device_id {
+            conditions.push("device_id = ?".to_string());
+            params.push(device_id.clone());
+        }
+
+        if let Some(start_time) = &query.start_time {
+            conditions.push("timestamp >= ?".to_string());
+            params.push(start_time.to_rfc3339());
+        }
+
+        if let Some(end_time) = &query.end_time {
+            conditions.push("timestamp <= ?".to_string());
+            params.push(end_time.to_rfc3339());
+        }
+
+        if !conditions.is_empty() {
+            let cond_str = conditions.join(" AND ");
+            sql = &format!("{} AND {}", sql, cond_str);
+        }
+
+        sql = &format!("{} ORDER BY device_id ASC, timestamp ASC", sql);
+
+        let rows: Vec<(
+            String,
+            String,
+            f64,
+            f64,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<i64>,
+            Option<f64>,
+            String,
+            Option<String>,
+            Option<f64>,
+            Option<f64>,
+            Option<String>,
+            Option<f64>,
+            Option<f64>,
+            String,
+        )> = {
+            let mut q = sqlx::query_as(sql);
+            for p in &params {
+                q = q.bind(p);
+            }
+            q.fetch_all(&self.pool).await?
+        };
+
+        let mut all_points: Vec<TrackPoint> = Vec::new();
+        for row in rows {
+            let (
+                id,
+                device_id,
+                latitude,
+                longitude,
+                altitude,
+                speed,
+                heading,
+                satellites,
+                hdop,
+                timestamp,
+                location_source,
+                accuracy,
+                battery_level,
+                extra_data,
+                distance,
+                cumulative_distance,
+                created_at,
+            ) = row;
+
+            all_points.push(TrackPoint {
+                id: Some(Uuid::parse_str(&id)?),
+                device_id,
+                latitude,
+                longitude,
+                altitude,
+                speed,
+                heading,
+                satellites: satellites.map(|s| s as i32),
+                hdop,
+                timestamp: DateTime::parse_from_rfc3339(&timestamp)?.with_timezone(&Utc),
+                location_source,
+                accuracy,
+                battery_level: battery_level.map(|b| b as f32),
+                extra_data: extra_data.as_deref().map(|s| serde_json::from_str(s).ok()),
+                distance,
+                cumulative_distance,
+                created_at: Some(DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc)),
+            });
+        }
+
+        let stop_timeout = query.stop_timeout_seconds.unwrap_or(300);
+
+        use std::collections::BTreeMap;
+        let mut device_groups: BTreeMap<String, Vec<TrackPoint>> = BTreeMap::new();
+        for point in all_points {
+            device_groups
+                .entry(point.device_id.clone())
+                .or_default()
+                .push(point);
+        }
+
+        let mut results: Vec<MileageStats> = Vec::new();
+
+        for (device_id, points) in device_groups {
+            let (filtered_points, total_meters) = filter_and_calculate_distance(
+                &points,
+                query.max_speed_kmh,
+                query.min_accuracy,
+            );
+
+            let point_count = filtered_points.len() as i64;
+            let start_time = filtered_points.first().map(|p| p.timestamp);
+            let end_time = filtered_points.last().map(|p| p.timestamp);
+
+            let mut total_moving_duration = Duration::zero();
+            let mut max_speed: Option<f64> = None;
+            let mut sum_speed = 0.0;
+            let mut speed_count = 0;
+
+            for i in 1..filtered_points.len() {
+                let prev = &filtered_points[i - 1];
+                let curr = &filtered_points[i];
+
+                let time_diff = (curr.timestamp - prev.timestamp).num_seconds();
+
+                if time_diff < stop_timeout && time_diff > 0 {
+                    total_moving_duration = total_moving_duration + Duration::seconds(time_diff);
+
+                    if let Some(speed) = curr.speed {
+                        sum_speed += speed;
+                        speed_count += 1;
+                        if max_speed.is_none() || speed > max_speed.unwrap() {
+                            max_speed = Some(speed);
+                        }
+                    } else if let Some(speed) = prev.speed {
+                        sum_speed += speed;
+                        speed_count += 1;
+                        if max_speed.is_none() || speed > max_speed.unwrap() {
+                            max_speed = Some(speed);
+                        }
+                    }
+                }
+            }
+
+            let avg_speed_kmh = if speed_count > 0 {
+                Some(sum_speed / speed_count as f64)
+            } else if total_moving_duration.num_seconds() > 0 && total_meters > 0.0 {
+                let hours = total_moving_duration.num_seconds() as f64 / 3600.0;
+                Some((total_meters / 1000.0) / hours)
+            } else {
+                None
+            };
+
+            let moving_duration_minutes = if total_moving_duration.num_seconds() > 0 {
+                Some(total_moving_duration.num_seconds() as f64 / 60.0)
+            } else {
+                None
+            };
+
+            results.push(MileageStats {
+                device_id,
+                point_count,
+                total_distance_meters: total_meters,
+                total_distance_formatted: format_distance(total_meters),
+                start_time,
+                end_time,
+                avg_speed_kmh,
+                max_speed_kmh: max_speed,
+                moving_duration_minutes,
+            });
+        }
+
+        info!("Calculated mileage for {} devices", results.len());
+        Ok(results)
     }
 }

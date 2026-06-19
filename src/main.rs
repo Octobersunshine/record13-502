@@ -1,3 +1,4 @@
+mod distance;
 mod db;
 mod errors;
 mod handlers;
@@ -6,8 +7,8 @@ mod parser;
 
 use crate::db::Database;
 use crate::handlers::{
-    delete_track_point, get_devices, get_raw_packet, get_track_point, get_track_points,
-    health_check, not_found, upload_location_data,
+    delete_track_point, get_devices, get_raw_packet, get_track_mileage, get_track_point,
+    get_track_points, health_check, not_found, upload_location_data,
 };
 use axum::{
     http::Method,
@@ -48,6 +49,7 @@ impl Modify for SecurityAddon {
         delete_track_point,
         get_devices,
         get_raw_packet,
+        get_track_mileage,
     ),
     components(
         schemas(
@@ -57,6 +59,8 @@ impl Modify for SecurityAddon {
             models::TrackQuery,
             models::SortOrder,
             models::TrackListResponse,
+            models::MileageQuery,
+            models::MileageStats,
             models::UploadResponse,
             models::ApiResponse<serde_json::Value>,
             models::ParsedPacket,
@@ -102,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/track/points", get(get_track_points))
         .route("/track/points/:id", get(get_track_point))
         .route("/track/points/:id", delete(delete_track_point))
+        .route("/track/mileage", get(get_track_mileage))
         .route("/devices", get(get_devices))
         .route("/packets/:id", get(get_raw_packet));
 
